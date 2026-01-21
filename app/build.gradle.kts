@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    kotlin("plugin.serialization") version "1.9.0"
+    kotlin("plugin.serialization") version "2.0.21"
 }
 
 android {
@@ -45,7 +45,6 @@ android {
 }
 
 dependencies {
-    implementation(libs.play.services.wearable)
     implementation(platform(libs.compose.bom))
     implementation(libs.ui)
     implementation(libs.ui.graphics)
@@ -60,6 +59,12 @@ dependencies {
     implementation("io.ktor:ktor-client-cio:2.3.7")
     implementation("io.ktor:ktor-client-content-negotiation:2.3.7")
     implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.7")
+
+    implementation(libs.androidx.health.services)
+    implementation(libs.kotlinx.coroutines.guava)
+
+    implementation(files("libs/samsung-health-sensor-api-1.4.1.aar"))
+    implementation("com.google.android.gms:play-services-wearable:18.1.0")
 
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.ui.test.junit4)

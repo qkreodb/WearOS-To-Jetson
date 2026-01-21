@@ -1,12 +1,6 @@
 pluginManagement {
     repositories {
-        google {
-            content {
-                includeGroupByRegex("com\\.android.*")
-                includeGroupByRegex("com\\.google.*")
-                includeGroupByRegex("androidx.*")
-            }
-        }
+        google()
         mavenCentral()
         gradlePluginPortal()
     }
@@ -14,10 +8,13 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        google()
+        google() // [필수] Health Services는 여기에 살고 있습니다.
         mavenCentral()
+        flatDir{
+            dirs("app/libs")
+        }
     }
 }
 
-rootProject.name = "DS Android(App"
+rootProject.name = "DS Android App"
 include(":app")

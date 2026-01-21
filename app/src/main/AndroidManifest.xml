@@ -11,6 +11,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <uses-permission android:name="com.samsung.android.wear.health.permission.BIOMETRIC_DATA" />
+
+    <!-- 피부 온도를 위해 추가 권한 -->
+
+    <uses-feature android:name="android.hardware.sensor.skin_temperature" android:required="false" />
+
     <uses-feature android:name="android.hardware.sensor.heartrate" android:required="true" />
 
     <application

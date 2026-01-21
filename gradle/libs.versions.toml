@@ -1,4 +1,7 @@
 [versions]
+ktx = "1.12.0"
+compose = "1.5.4"
+
 agp = "8.13.2"
 kotlin = "2.0.21"
 playServicesWearable = "18.0.0"
@@ -8,6 +11,10 @@ composeFoundation = "1.2.1"
 wearToolingPreview = "1.0.0"
 activityCompose = "1.8.0"
 coreSplashscreen = "1.0.1"
+
+# 아래는 초기 버전이라 싱크 오류 가능성이 있어서 베타로 수정해봄
+healthServices = "1.1.0-alpha04"
+guava = "1.10.2"
 
 [libraries]
 play-services-wearable = { group = "com.google.android.gms", name = "play-services-wearable", version.ref = "playServicesWearable" }
@@ -23,6 +30,10 @@ compose-foundation = { group = "androidx.wear.compose", name = "compose-foundati
 wear-tooling-preview = { group = "androidx.wear", name = "wear-tooling-preview", version.ref = "wearToolingPreview" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
+
+
+androidx-health-services = { group = "androidx.health", name = "health-services-client", version.ref = "healthServices" }
+kotlinx-coroutines-guava = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-guava", version.ref = "guava" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
