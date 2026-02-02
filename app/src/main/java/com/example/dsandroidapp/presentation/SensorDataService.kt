@@ -43,8 +43,8 @@ class SensorDataService : Service() {
     private var udpSocket: DatagramSocket? = null
 
     // ====== Periods ======
-    private val heartRateSendPeriodMs = 5_000L        // 심박 UDP 송신 주기
-    private val skinTempTriggerPeriodMs = 60_000L     // 피부온도 측정 트리거 주기(ON_DEMAND)
+    private val heartRateSendPeriodMs = 5_000L        // 심박 UDP 송신 주기 (5초주기)
+    private val skinTempTriggerPeriodMs = 60_000L     // 피부온도 측정 트리거 주기(ON_DEMAND) (1분 주기)
 
     // ====== IDs ======
     private lateinit var deviceId: String
