@@ -23,6 +23,10 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 
+import android.hardware.Sensor
+import android.hardware.SensorManager
+import android.content.Context
+
 // Samsung Health Sensor SDK (Health Tracking)
 import com.samsung.android.service.health.tracking.ConnectionListener
 import com.samsung.android.service.health.tracking.HealthTracker
@@ -108,6 +112,8 @@ class SensorDataService : Service() {
         val connectionListener = object : ConnectionListener {
             override fun onConnectionSuccess() {
                 Log.d(tag, "✅ HealthTrackingService 연결 성공")
+
+                logSupportedSensors()
 
                 // 지원 트래커 목록 확인 (이게 제일 중요)
                 val supportedTypes: List<HealthTrackerType> =
@@ -205,7 +211,7 @@ class SensorDataService : Service() {
                 val last = lastHeartRateSentAt.get()
                 if (now - last >= heartRateSendPeriodMs && lastHeartRateSentAt.compareAndSet(last, now)) {
                     Log.d(tag, "❤️ 심박 수신: $hrValue (전송)")
-                    sendToJetsonUDP("HEART_RATE", hrValue)
+                    sendToJetsonUDP("hr", hrValue)
                 } else {
                     // 너무 자주 들어올 수 있어서 5초 스킵
                     Log.d(tag, "❤️ 심박 수신: $hrValue (스킵: 5초 제한)")
@@ -254,7 +260,7 @@ class SensorDataService : Service() {
                 Log.d(tag, "🌡️ 피부온도 수신: status=$status wrist=$wrist ambient=$ambient")
 
                 if (wrist != null) {
-                    sendToJetsonUDP("SKIN_TEMP", wrist)
+                    sendToJetsonUDP("sk_temp", wrist)
                 } else {
                     Log.w(tag, "⚠️ OBJECT_TEMPERATURE=null (착용상태/권한/지원/센서조건 가능성)")
                 }
@@ -314,10 +320,11 @@ class SensorDataService : Service() {
                 val formattedDate = timeFormat.format(Date())
 
                 val json = JSONObject().apply {
-                    put("deviceId", deviceId)
+                    put("sen_id", deviceId)
+                    put("wp_id", "1번 작업장")
                     put("type", type)
                     put("value", value)
-                    put("ts", formattedDate)
+                    put("time", formattedDate)
                 }
 
                 val message = json.toString().toByteArray()
@@ -360,6 +367,41 @@ class SensorDataService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(channelID, "DS", NotificationManager.IMPORTANCE_LOW)
             manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun logSupportedSensors() {
+        try {
+            Log.i(tag, "================================================")
+            Log.i(tag, "🔍 [워치 전체 센서 리스트 조회 시작]")
+            Log.i(tag, "📱 기기 모델명: ${android.os.Build.MODEL}")
+
+            // --- 1. 삼성 Health SDK 지원 센서 조회 ---
+            val capability = healthTrackingService?.trackingCapability
+            val samsungSensors = capability?.supportHealthTrackerTypes ?: emptyList()
+
+            Log.i(tag, "------------------------------------------------")
+            Log.i(tag, "🧬 [삼성 Health SDK 전용 센서: ${samsungSensors.size}개]")
+            samsungSensors.forEachIndexed { index, type ->
+                Log.d(tag, "✅ [Samsung] ${index + 1}. ${type.name}")
+            }
+
+            // --- 2. 안드로이드 표준 API 지원 센서 조회 ---
+            val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            val androidSensors = sensorManager.getSensorList(Sensor.TYPE_ALL)
+
+            Log.i(tag, "------------------------------------------------")
+            Log.i(tag, "🤖 [안드로이드 표준 API 센서: ${androidSensors.size}개]")
+            androidSensors.forEachIndexed { index, sensor ->
+                // 센서 이름과 제조사 정보를 같이 찍어주면 IMU 확인이 더 쉽습니다.
+                Log.d(tag, "✅ [Android] ${index + 1}. ${sensor.name} (Type: ${sensor.stringType})")
+            }
+
+            Log.i(tag, "================================================")
+            Log.i(tag, "🔍 [리스트 조회 완료]")
+
+        } catch (e: Exception) {
+            Log.e(tag, "❌ 센서 목록 조회 중 에러 발생: ${e.message}")
         }
     }
 }
