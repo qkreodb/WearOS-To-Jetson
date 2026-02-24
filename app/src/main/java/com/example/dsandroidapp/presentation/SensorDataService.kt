@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong
 import android.hardware.Sensor
 import android.hardware.SensorManager
 import android.content.Context
+import android.os.PowerManager
 
 // Samsung Health Sensor SDK (Health Tracking)
 import com.samsung.android.service.health.tracking.ConnectionListener
@@ -41,13 +42,20 @@ class SensorDataService : Service() {
     private val tag = "DS_SERVICE"
     private val channelID = "SensorServiceChannel"
 
+    // WakeLock: CPU 안꺼지게
+    private var wakeLock : PowerManager.WakeLock? = null
+
     // ====== Jetson UDP ======
     private val jetsonIp = "192.168.0.10"
     private val jetsonPort = 5005
     private var udpSocket: DatagramSocket? = null
 
+    // NULL 방지
+    private var currentHR: Float? = null
+    private var currentST: Float? = null
+
     // ====== Periods ======
-    private val heartRateSendPeriodMs = 5_000L        // 심박 UDP 송신 주기 (5초주기)
+    private val sendLoopPeriodMs = 5_000L        // 5초 주기 통합 루프에서 사용함
     private val skinTempTriggerPeriodMs = 60_000L     // 피부온도 측정 트리거 주기(ON_DEMAND) (1분 주기)
 
     // ====== IDs ======
@@ -64,24 +72,28 @@ class SensorDataService : Service() {
     private var heartRateTracker: HealthTracker? = null
     private var skinTempTracker: HealthTracker? = null
 
-    // ====== Throttling ======
-    private val lastHeartRateSentAt = AtomicLong(0L)
-    private val lastSkinTempTriggeredAt = AtomicLong(0L)
-
     override fun onCreate() {
         super.onCreate()
 
         deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
         createNotificationChannel()
 
+        // WakeLock으로 화면이 꺼져도 CPU와 센서 깨워둠
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DS:SensorWakeLock")
+        wakeLock?.acquire()
+
         try {
             udpSocket = DatagramSocket()
-            Log.d(tag, "✅ UDP 소켓 생성 완료")
         } catch (e: Exception) {
-            Log.e(tag, "❌ UDP 소켓 생성 실패: ${e.message}", e)
+            Log.e(tag, "UDP 소켓 에러", e)
         }
 
         connectSamsungHealthTrackingService()
+
+        // 통합 전송 루프
+        startUnifiedSendLoop()
+
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -93,99 +105,55 @@ class SensorDataService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                1,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
+            startForeground(1, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(1, notification)
         }
-
         return START_STICKY
     }
 
-    // =========================================================
-    // 1) Samsung HealthTrackingService 연결
-    // =========================================================
-    private fun connectSamsungHealthTrackingService() {
-        val connectionListener = object : ConnectionListener {
-            override fun onConnectionSuccess() {
-                Log.d(tag, "✅ HealthTrackingService 연결 성공")
+    // 통합 전송: NULL이 아닐 때 5초마다 전송
+    private fun startUnifiedSendLoop(){
+        serviceScope.launch{
+            while(isActive){
+                val hr = currentHR
+                val st = currentST
 
-                logSupportedSensors()
-
-                // 지원 트래커 목록 확인 (이게 제일 중요)
-                val supportedTypes: List<HealthTrackerType> =
-                    try {
-                        // SDK에 따라 getTrackingCapability() / trackingCapability 둘 다 케이스가 있는데
-                        // Kotlin에선 보통 아래처럼 property로 접근 가능(실패하면 catch로 로그)
-                        healthTrackingService?.trackingCapability?.supportHealthTrackerTypes ?: emptyList()
-                    } catch (e: Exception) {
-                        Log.e(tag, "❌ trackingCapability 조회 실패: ${e.message}", e)
-                        emptyList()
-                    }
-
-                Log.d(tag, "📌 지원 트래커 목록: $supportedTypes")
-
-                // Tracker 생성
-                initTrackers(supportedTypes)
-
-                // 심박 리스닝 시작(continuous)
-                startHeartRateListening()
-
-                // 피부온도는 1분마다 ON_DEMAND 트리거
-                startSkinTempOnDemandLoop()
-            }
-
-            override fun onConnectionEnded() {
-                Log.w(tag, "⚠️ HealthTrackingService 연결 종료")
-            }
-
-            override fun onConnectionFailed(e: HealthTrackerException) {
-                Log.e(tag, "❌ HealthTrackingService 연결 실패: ${e.message}", e)
-                if (e.hasResolution()) {
-                    // Service에서 바로 UI 띄워 해결하기 어려움 (보통 Activity에서 처리)
-                    Log.e(tag, "➡️ resolution 필요: Activity에서 ResolutionIntent 처리 권장")
+                if (hr!=null && st!=null){
+                    sendToJetsonUDP(hr, st)
+                } else {
+                    Log.d(tag, "데이터 대기 중 (심박수: $hr, 피부 온도: $st")
                 }
+                delay(sendLoopPeriodMs)
             }
-        }
-
-        try {
-            healthTrackingService = HealthTrackingService(connectionListener, applicationContext)
-            healthTrackingService?.connectService()
-            Log.d(tag, "🚀 connectService() 호출")
-        } catch (e: Exception) {
-            Log.e(tag, "❌ HealthTrackingService 생성/연결 실패: ${e.message}", e)
         }
     }
 
     // =========================================================
-    // 2) Tracker 생성 (지원 여부 기반)
+    // 5) UDP 전송
     // =========================================================
-    private fun initTrackers(supported: List<HealthTrackerType>) {
-        // --- Heart Rate ---
-        if (supported.contains(HealthTrackerType.HEART_RATE_CONTINUOUS)) {
+    private fun sendToJetsonUDP(hr: Float, st: Float) {
+        serviceScope.launch {
             try {
-                heartRateTracker = healthTrackingService?.getHealthTracker(HealthTrackerType.HEART_RATE_CONTINUOUS)
-                Log.d(tag, "✅ HeartRate tracker 생성 완료 (HEART_RATE_CONTINUOUS)")
-            } catch (e: Exception) {
-                Log.e(tag, "❌ HeartRate tracker 생성 실패: ${e.message}", e)
-            }
-        } else {
-            Log.e(tag, "❌ HEART_RATE_CONTINUOUS 미지원 (권한/환경/SDK 확인)")
-        }
+                val timeFormat = SimpleDateFormat("yy-MM-dd HH:mm:ss", Locale.KOREAN)
+                val formattedDate = timeFormat.format(Date())
 
-        // --- Skin Temperature (ON_DEMAND) ---
-        if (supported.contains(HealthTrackerType.SKIN_TEMPERATURE_ON_DEMAND)) {
-            try {
-                skinTempTracker = healthTrackingService?.getHealthTracker(HealthTrackerType.SKIN_TEMPERATURE_ON_DEMAND)
-                Log.d(tag, "✅ SkinTemp tracker 생성 완료 (SKIN_TEMPERATURE_ON_DEMAND)")
+                val json = JSONObject().apply {
+                    put("sen_id", deviceId)
+                    put("wp_id", "1번 작업장")
+                    put("sk_temp", st)
+                    put("hr", hr)
+                    put("time", formattedDate)
+                }
+
+                val message = json.toString().toByteArray()
+                val packet = DatagramPacket(message, message.size, InetAddress.getByName(jetsonIp), jetsonPort)
+                udpSocket?.send(packet)
+                Log.d(tag, "[전송 성공] $formattedDate | 심박수: $hr, 피부 온도: $st")
             } catch (e: Exception) {
-                Log.e(tag, "❌ SkinTemp tracker 생성 실패: ${e.message}", e)
+                Log.e(tag, "[전송 실패]", e)
             }
-        } else {
-            Log.e(tag, "❌ SKIN_TEMPERATURE_ON_DEMAND 미지원 (권한/환경/SDK 확인)")
         }
     }
 
@@ -195,55 +163,14 @@ class SensorDataService : Service() {
     private val heartRateListener = object : HealthTracker.TrackerEventListener {
         override fun onDataReceived(dataPoints: List<DataPoint>) {
             for (dp in dataPoints) {
-                val hrValue: Float? = try {
-                    // ✅ 삼성 SDK 심박 키
-                    dp.getValue(ValueKey.HeartRateSet.HEART_RATE).toFloat()
-                } catch (e: Exception) {
-                    null
-                }
-
-                if (hrValue == null) {
-                    Log.w(tag, "⚠️ 심박 파싱 실패(ValueKey 확인 필요)")
-                    continue
-                }
-
-                val now = System.currentTimeMillis()
-                val last = lastHeartRateSentAt.get()
-                if (now - last >= heartRateSendPeriodMs && lastHeartRateSentAt.compareAndSet(last, now)) {
-                    Log.d(tag, "❤️ 심박 수신: $hrValue (전송)")
-                    sendToJetsonUDP("hr", hrValue)
-                } else {
-                    // 너무 자주 들어올 수 있어서 5초 스킵
-                    Log.d(tag, "❤️ 심박 수신: $hrValue (스킵: 5초 제한)")
-                }
+                try {
+                    currentHR = dp.getValue(ValueKey.HeartRateSet.HEART_RATE).toFloat()
+                } catch (e: Exception) {Log.e(tag, "심박수 파싱 실패", e)}
             }
         }
+        override fun onError(error: HealthTracker.TrackerError){Log.e(tag, "HR 에러: $error")}
+        override fun onFlushCompleted() { Log.d(tag, "HR Flush 완료") }
 
-        override fun onFlushCompleted() {
-            Log.d(tag, "HeartRate flush completed")
-        }
-
-        override fun onError(error: HealthTracker.TrackerError) {
-            Log.e(tag, "❌ 심박 트래커 에러: $error")
-        }
-    }
-
-    private fun startHeartRateListening() {
-        val tracker = heartRateTracker
-        if (tracker == null) {
-            Log.w(tag, "⚠️ heartRateTracker=null, 심박 리스닝 시작 불가")
-            return
-        }
-
-        // listener 등록은 메인에서 처리(안전)
-        mainHandler.post {
-            try {
-                tracker.setEventListener(heartRateListener)
-                Log.d(tag, "🚀 심박 트래커 리스닝 시작")
-            } catch (e: Exception) {
-                Log.e(tag, "❌ 심박 리스닝 시작 실패: ${e.message}", e)
-            }
-        }
     }
 
     // =========================================================
@@ -252,95 +179,80 @@ class SensorDataService : Service() {
     private val skinTempListener = object : HealthTracker.TrackerEventListener {
         override fun onDataReceived(dataPoints: List<DataPoint>) {
             for (dp in dataPoints) {
-                // ✅ 삼성 예제 스타일 키
-                val status: Int? = try { dp.getValue(ValueKey.SkinTemperatureSet.STATUS) } catch (_: Exception) { null }
-                val wrist: Float? = try { dp.getValue(ValueKey.SkinTemperatureSet.OBJECT_TEMPERATURE) } catch (_: Exception) { null }
-                val ambient: Float? = try { dp.getValue(ValueKey.SkinTemperatureSet.AMBIENT_TEMPERATURE) } catch (_: Exception) { null }
-
-                Log.d(tag, "🌡️ 피부온도 수신: status=$status wrist=$wrist ambient=$ambient")
-
-                if (wrist != null) {
-                    sendToJetsonUDP("sk_temp", wrist)
-                } else {
-                    Log.w(tag, "⚠️ OBJECT_TEMPERATURE=null (착용상태/권한/지원/센서조건 가능성)")
-                }
+                try {
+                    val wrist = dp.getValue(ValueKey.SkinTemperatureSet.OBJECT_TEMPERATURE)
+                    if (wrist != null && wrist > 0) {
+                        currentST = wrist
+                        Log.d(tag, "🌡️ 피부온도 갱신: $wrist")
+                    }
+                } catch (e: Exception) { Log.e(tag, "ST 파싱 실패", e) }
             }
+            mainHandler.post { try {skinTempTracker?.unsetEventListener()} catch(e: Exception) {} }
+        }
+        override fun onError(error: HealthTracker.TrackerError) { Log.e(tag, "ST 에러: $error") }
+        override fun onFlushCompleted() { Log.d(tag, "ST Flush 완료") }
+    }
 
-            // ON_DEMAND는 1회 받으면 listener 내려주는 게 깔끔 (다음 1분에 다시 트리거)
+
+    private fun startHeartRateListening() {
+        heartRateTracker?.let { tracker ->
             mainHandler.post {
-                try { skinTempTracker?.unsetEventListener() } catch (_: Exception) {}
+                try {
+                    tracker.setEventListener(heartRateListener)
+                    Log.d(tag, "심박 리스닝 시작")
+                } catch (e: Exception) { Log.e(tag, "HR 시작 실패", e) }
             }
-        }
-
-        override fun onFlushCompleted() {
-            Log.d(tag, "SkinTemp flush completed")
-        }
-
-        override fun onError(error: HealthTracker.TrackerError) {
-            Log.e(tag, "❌ 피부온도 트래커 에러: $error")
         }
     }
 
     private fun startSkinTempOnDemandLoop() {
-        val tracker = skinTempTracker
-        if (tracker == null) {
-            Log.w(tag, "⚠️ skinTempTracker=null, 피부온도 ON_DEMAND 루프 시작 불가")
-            return
-        }
-
         serviceScope.launch {
             while (isActive) {
-                val now = System.currentTimeMillis()
-                val last = lastSkinTempTriggeredAt.get()
-
-                if (now - last >= skinTempTriggerPeriodMs && lastSkinTempTriggeredAt.compareAndSet(last, now)) {
-                    // 트리거(=리스너 등록)는 메인에서
-                    mainHandler.post {
-                        try {
-                            tracker.setEventListener(skinTempListener)
-                            Log.d(tag, "🚀 피부온도 ON_DEMAND 트리거(리스너 등록)")
-                        } catch (e: Exception) {
-                            Log.e(tag, "❌ 피부온도 리스너 등록 실패: ${e.message}", e)
-                        }
-                    }
+                mainHandler.post {
+                    try {
+                        skinTempTracker?.setEventListener(skinTempListener)
+                        Log.d(tag, "피부온도 측정 트리거")
+                    } catch (e: Exception) { Log.e(tag, "ST 트리거 실패", e) }
                 }
-
-                delay(1_000L)
+                delay(skinTempTriggerPeriodMs) // 1분 대기
             }
         }
     }
 
     // =========================================================
-    // 5) UDP 전송
+    // 서비스 연결 및 정리 로직
     // =========================================================
-    private fun sendToJetsonUDP(type: String, value: Float) {
-        serviceScope.launch {
-            try {
-                val timeFormat = SimpleDateFormat("yy-MM-dd HH:mm:ss", Locale.KOREAN)
-                val formattedDate = timeFormat.format(Date())
+    private fun connectSamsungHealthTrackingService() {
+        val connectionListener = object : ConnectionListener {
+            override fun onConnectionSuccess() {
+                Log.d(tag, "✅ HealthTrackingService 연결 성공")
 
-                val json = JSONObject().apply {
-                    put("sen_id", deviceId)
-                    put("wp_id", "1번 작업장")
-                    put("type", type)
-                    put("value", value)
-                    put("time", formattedDate)
-                }
+                val supported = healthTrackingService?.trackingCapability?.supportHealthTrackerTypes ?: emptyList()
+                initTrackers(supported)
 
-                val message = json.toString().toByteArray()
-                val address = InetAddress.getByName(jetsonIp)
-                val packet = DatagramPacket(message, message.size, address, jetsonPort)
-
-                udpSocket?.send(packet)
-                Log.d(tag, "[$formattedDate] [$type] $value 전송 완료")
-            } catch (e: Exception) {
-                Log.e(tag, "❌ UDP 전송 에러: ${e.message}", e)
+                startHeartRateListening()
+                startSkinTempOnDemandLoop() // 초기 즉시 실행 포함
             }
+            override fun onConnectionEnded() { Log.w(tag, "⚠️ 연결 종료") }
+            override fun onConnectionFailed(e: HealthTrackerException) { Log.e(tag, "❌ 연결 실패: ${e.message}") }
+        }
+        healthTrackingService = HealthTrackingService(connectionListener, applicationContext).apply { connectService() }
+    }
+
+    private fun initTrackers(supported: List<HealthTrackerType>) {
+        if (supported.contains(HealthTrackerType.HEART_RATE_CONTINUOUS)) {
+            heartRateTracker = healthTrackingService?.getHealthTracker(HealthTrackerType.HEART_RATE_CONTINUOUS)
+        }
+        if (supported.contains(HealthTrackerType.SKIN_TEMPERATURE_ON_DEMAND)) {
+            skinTempTracker = healthTrackingService?.getHealthTracker(HealthTrackerType.SKIN_TEMPERATURE_ON_DEMAND)
         }
     }
+
+
 
     override fun onDestroy() {
         super.onDestroy()
+        wakeLock?.let{if (it.isHeld) it.release()} // wakeLock 해제
 
         // 코루틴 종료
         serviceScope.cancel()
@@ -367,41 +279,6 @@ class SensorDataService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(channelID, "DS", NotificationManager.IMPORTANCE_LOW)
             manager.createNotificationChannel(channel)
-        }
-    }
-
-    private fun logSupportedSensors() {
-        try {
-            Log.i(tag, "================================================")
-            Log.i(tag, "🔍 [워치 전체 센서 리스트 조회 시작]")
-            Log.i(tag, "📱 기기 모델명: ${android.os.Build.MODEL}")
-
-            // --- 1. 삼성 Health SDK 지원 센서 조회 ---
-            val capability = healthTrackingService?.trackingCapability
-            val samsungSensors = capability?.supportHealthTrackerTypes ?: emptyList()
-
-            Log.i(tag, "------------------------------------------------")
-            Log.i(tag, "🧬 [삼성 Health SDK 전용 센서: ${samsungSensors.size}개]")
-            samsungSensors.forEachIndexed { index, type ->
-                Log.d(tag, "✅ [Samsung] ${index + 1}. ${type.name}")
-            }
-
-            // --- 2. 안드로이드 표준 API 지원 센서 조회 ---
-            val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-            val androidSensors = sensorManager.getSensorList(Sensor.TYPE_ALL)
-
-            Log.i(tag, "------------------------------------------------")
-            Log.i(tag, "🤖 [안드로이드 표준 API 센서: ${androidSensors.size}개]")
-            androidSensors.forEachIndexed { index, sensor ->
-                // 센서 이름과 제조사 정보를 같이 찍어주면 IMU 확인이 더 쉽습니다.
-                Log.d(tag, "✅ [Android] ${index + 1}. ${sensor.name} (Type: ${sensor.stringType})")
-            }
-
-            Log.i(tag, "================================================")
-            Log.i(tag, "🔍 [리스트 조회 완료]")
-
-        } catch (e: Exception) {
-            Log.e(tag, "❌ 센서 목록 조회 중 에러 발생: ${e.message}")
         }
     }
 }
