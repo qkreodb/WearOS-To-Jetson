@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import android.os.Vibrator
 import android.os.VibrationEffect
 import androidx.annotation.RequiresPermission
+import java.util.zip.CRC32
 
 // Samsung Health Tracking
 import com.samsung.android.service.health.tracking.ConnectionListener
@@ -37,6 +38,7 @@ import com.samsung.android.service.health.tracking.HealthTrackingService
 import com.samsung.android.service.health.tracking.data.DataPoint
 import com.samsung.android.service.health.tracking.data.HealthTrackerType
 import com.samsung.android.service.health.tracking.data.ValueKey
+import kotlin.math.abs
 
 class SensorDataService : Service() {
 
@@ -65,6 +67,7 @@ class SensorDataService : Service() {
 
     // ====== IDs ======
     private lateinit var deviceId: String
+    private var sensorId: Int = 0
 
     // ====== Runtime ======
     private val started = AtomicBoolean(false)
@@ -83,6 +86,14 @@ class SensorDataService : Service() {
         super.onCreate()
 
         deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+
+        // 2. CRC32를 이용해 정수로 변환
+        val crc = CRC32()
+        val MAX_SEN_ID = 20000
+        crc.update(deviceId.toByteArray())
+        // 32비트 정수 범위로 변환 (음수 방지를 위해 abs 사용 권장)
+        sensorId = (abs(crc.value.toLong()) % (MAX_SEN_ID + 1)).toInt()
+
         createNotificationChannel()
         acquireWakeLockSafely()
 
@@ -102,7 +113,7 @@ class SensorDataService : Service() {
             try {
                 val receiveSocket = DatagramSocket(watchListenPort)
                 val buffer = ByteArray(1024)
-                Log.d(tag, "👂 젯슨 state_code 수신 대기 중 (Port: $watchListenPort)")
+                Log.d(tag, "젯슨 state_code 수신 대기 중 (Port: $watchListenPort)")
 
                 while (isActive) {
                     val packet = DatagramPacket(buffer, buffer.size)
@@ -134,8 +145,8 @@ class SensorDataService : Service() {
         if (isResting) return // 이미 휴식 중이면 중복 실행 방지
 
         val restTimeMinutes = when (code) {
-            "1" -> 2L // 일반 휴식 (20분) 테스트를 위해 2분으로 줄여두었음
-            "2" -> 15L // 긴급 휴식 (15분)
+            "REST_START" -> 1L // 일반 휴식 (20분) 테스트를 위해 1분으로 줄여두었음
+            "EMERGENCY_REST" -> 2L // 긴급 휴식 (15분)
             else -> return
         }
 
@@ -151,7 +162,7 @@ class SensorDataService : Service() {
             vibrateWatch(3) // 진동 알림
             updateNotification("휴식 명령 수신", "${minutes}분간 휴식을 취하세요. 센서가 중단됩니다.")
             stopAllSensors() // 센서 리스너 해제
-            Log.d(tag, "💤 휴식 모드 진입: ${minutes}분 (통신 및 센서 중단)")
+            Log.d(tag, "휴식 모드 진입: ${minutes}분 (통신 및 센서 중단)")
 
             // 정해진 시간 동안 대기
             delay(minutes * 60 * 1000L)
@@ -161,7 +172,7 @@ class SensorDataService : Service() {
             vibrateWatch(5) // 종료 알림
             updateNotification("휴식 종료", "다시 업무를 시작하세요. 센서가 가동됩니다.")
             startAllSensors() // 센서 리스너 재등록
-            Log.d(tag, "🏃 휴식 종료: 센서 및 통신 재개")
+            Log.d(tag, "휴식 종료: 센서 및 통신 재개")
         }
     }
 
@@ -231,13 +242,13 @@ class SensorDataService : Service() {
 
         // 2) 루프/연결 중복 방지 (중요)
         if (started.compareAndSet(false, true)) {
-            Log.d(tag, "🚀 Service started (first time)")
+            Log.d(tag, "Service started (first time)")
 
             connectSamsungHealthTrackingService()
             startUdpReceiver()
             startUnifiedSendLoop()
         } else {
-            Log.d(tag, "ℹ️ onStartCommand called again (already started)")
+            Log.d(tag, "ℹonStartCommand called again (already started)")
         }
 
         return START_STICKY
@@ -297,9 +308,9 @@ class SensorDataService : Service() {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DS:SensorWakeLock")
 
             wakeLock?.acquire()
-            Log.d(tag, "✅ WakeLock acquired (10min timeout)")
+            Log.d(tag, "WakeLock acquired")
         } catch (e: Exception) {
-            Log.e(tag, "❌ WakeLock acquire 실패", e)
+            Log.e(tag, "WakeLock acquire 실패", e)
         }
     }
 
@@ -485,8 +496,8 @@ class SensorDataService : Service() {
         val formattedDate = timeFormat.format(Date())
 
         val json = JSONObject().apply {
-            put("sen_id", deviceId)
-            put("wp_id", "1번 작업장")
+            put("sen_id", sensorId)
+            put("wp_id", 1)
             put("hr", hr)
             put("time", formattedDate)
 
